@@ -64,7 +64,7 @@ jobs:
       # 単体テスト (純粋関数) と tests/*_db.rs (口から実 DB まで) を計測つきで 1 回だけ走らせる。
       # テストの target ごとに本数を固定する (減ったら落ちる。テストを足したらここの数も上げる)。
       # 接続文字列は runner の中の使い捨ての DB のもので、secret ではない。
-      - name: lib・timecard_db + Coverage 100% gate
+      - name: lib・timecard_db・employees_db + Coverage 100% gate
         env:
           PEOPLE_TEST_ADMIN_DATABASE_URL: postgresql://postgres:test@localhost:5432/postgres
           CARGO_TERM_COLOR: never
@@ -75,9 +75,11 @@ jobs:
           cargo llvm-cov --locked -p people --no-report 2>&1 | tee "$RUNNER_TEMP/people-test.txt"
           # target ごとの結果の行だけを見る (ほかの target の行と取り違えない)
           awk '/Running unittests src\/lib\.rs \(/{f=1} f && /^test result:/{print; exit}' "$RUNNER_TEMP/people-test.txt" \
-            | grep -Eq '^test result: ok\. 6 passed; 0 failed; 0 ignored'
+            | grep -Eq '^test result: ok\. 8 passed; 0 failed; 0 ignored'
           awk '/Running tests\/timecard_db\.rs \(/{f=1} f && /^test result:/{print; exit}' "$RUNNER_TEMP/people-test.txt" \
             | grep -Eq '^test result: ok\. 8 passed; 0 failed; 0 ignored'
+          awk '/Running tests\/employees_db\.rs \(/{f=1} f && /^test result:/{print; exit}' "$RUNNER_TEMP/people-test.txt" \
+            | grep -Eq '^test result: ok\. 5 passed; 0 failed; 0 ignored'
           # -p を付けないと直下の package (worker) だけが対象になり、報告が空になる
           cargo llvm-cov report --locked -p people --text > "$RUNNER_TEMP/people-cov.txt"
           bash scripts/check_coverage_100.sh --use-cache "$RUNNER_TEMP/people-cov.txt"

@@ -1,7 +1,8 @@
-//! 社員・タイムカードの口 (Refs ippoan/rust-alc-api#680)。rust-alc-api の `crates/alc-misc` の timecard.rs と
-//! repo/timecard.rs・`alc-core` の repository/timecard.rs の写しで、path・method・JSON の形・status は rust と同じ
+//! 社員・タイムカードの口 (Refs ippoan/rust-alc-api#680)。rust-alc-api の `crates/alc-misc` の employees.rs・timecard.rs と
+//! repo/・`alc-core` の repository/ の写しで、path・method・JSON の形・status は rust と同じ
 //! (alc-app・tc-ohishi のカード同期・運行管理者席がそのまま使う)。
 //!
+//! - [`employees`] — 社員 (CRUD・顔・免許証・照会・乗務員マスタの一括取り込み。取り込みは保留中のカードを同じ transaction で結ぶ)
 //! - [`timecard`] — カード台帳 (登録・一覧・取得・削除・社員番号キーの一括取り込み・同期の削除・カードから社員の照会) と
 //!   打刻の一覧・CSV (打刻の一次表は `hub_measurements`。書き込みは alc-devices の `POST /api/hub/measurements` に残る)
 //!
@@ -11,6 +12,7 @@
 //! DB は `PgClient::tenant_tx` + `query_typed` 系だけ (名前付き prepared statement は使わない)。WHERE に tenant_id も書く
 //! (rust は RLS 任せだった)。ログ・エラー応答は固定の語だけ (エラーの文・識別子・card_id を載せない)。
 
+pub mod employees;
 pub mod timecard;
 
 use std::sync::Arc;
@@ -64,6 +66,7 @@ pub async fn with_device_dev_slot(mut req: Request, next: Next) -> Response {
 pub fn router() -> Router<AppState> {
     // 後に足した route_layer が外側: slot を置く → tenant と dev の印を読む → 口
     let api = timecard::router()
+        .merge(employees::router())
         .route_layer(middleware::from_fn(require_tenant_header))
         .route_layer(middleware::from_fn(with_device_dev_slot));
     Router::new().nest("/api", api)

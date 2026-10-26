@@ -4,7 +4,7 @@
 #   PEOPLE_TEST_ADMIN_DATABASE_URL=... cargo llvm-cov --locked -p people --text > cov-people.txt
 #   bash scripts/check_coverage_100.sh --use-cache cov-people.txt
 #
-# 計測するのは `cargo test -p people` の全部 = 各 module の単体テストと tests/timecard_db.rs
+# 計測するのは `cargo test -p people` の全部 = 各 module の単体テストと tests/timecard_db.rs・employees_db.rs
 # (口から実 DB まで。接続先が無ければ失敗する)。worker 本体 (直下の src/、wasm 専用) は native で計測できないので対象外。
 
 # tenant と dev の印の layer・DB の失敗の語・router の組み立て
@@ -14,3 +14,7 @@ path = "crates/people/src/lib.rs"
 # タイムカード (台帳・一括取り込み・同期の削除・照会・打刻の一覧と CSV)
 [[files]]
 path = "crates/people/src/timecard.rs"
+
+# 社員 (CRUD・顔・免許証・照会・乗務員マスタの一括取り込みと保留カードの結び付け)
+[[files]]
+path = "crates/people/src/employees.rs"
