@@ -1,0 +1,33 @@
+[package]
+name = "people"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# 口 (`router`)・入力の検証・SQL を持ち、native でも wasm32-unknown-unknown でもビルドできる
+# (接続は持たない。張るのは直下の worker と tests/)。
+[dependencies]
+# 出どころは直下の Cargo.toml の [workspace.dependencies] の 1 か所 (ここに git / path を書かない)
+alc-core-wasm = { workspace = true }
+alc-worker-db = { workspace = true }
+axum = { version = "0.8", default-features = false, features = ["json", "query"] }
+# 行の created_at など (rust-alc-api と同じ chrono の JSON の形)。免許証の日付は NaiveDate
+chrono = { version = "0.4", default-features = false, features = ["alloc", "serde"] }
+# SQL の共通部分 (打刻の CTE・列) を const のまま連結する
+const_format = "0.2"
+# 打刻の CSV (rust と同じ csv crate。pure Rust で wasm32 でもビルドできる)
+csv = "1"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# 型付きの文の型 (`Type`) と列の型 (uuid・timestamptz・date)。接続は張らない
+# (wasm 用の feature `js` は直下の worker と alc-worker-db が付ける)
+tokio-postgres = { version = "0.7", default-features = false, features = ["with-uuid-1", "with-chrono-0_4", "with-serde_json-1"] }
+uuid = { version = "1", features = ["serde"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync"] }
+# tests/ の実 DB の接続 (runtime 付き)。dev-dependency なので wasm のビルドには入らない
+tokio-postgres = { version = "0.7", features = ["with-uuid-1", "with-chrono-0_4", "with-serde_json-1"] }
+tower = { version = "0.5", features = ["util"] }
+uuid = { version = "1", features = ["v4"] }

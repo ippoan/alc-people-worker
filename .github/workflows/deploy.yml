@@ -1,0 +1,154 @@
+name: Deploy
+
+# 社員・タイムカードの Worker alc-people のデプロイ (ippoan/alc-records-worker の deploy.yml の形。
+# Refs ippoan/rust-alc-api#680)。ci.yml とは別 workflow。
+#   - タグ v*               → 本番 (wrangler.toml のトップレベル)。Tag Release (tag-release.yml) を手動で打つ
+#   - main への push        → staging (--env staging)
+#   - pull_request          → wrangler deploy --dry-run だけ (secret 不要。この workflow 自体の検証)
+# マージで自動のタグは付けない (マージ = staging、手動のタグ = 本番)。
+# account_id は書かない (CLOUDFLARE_API_TOKEN から決まる)。staging の URL は実ホスト名なので
+# ログに出さない: wrangler の出力はファイルに取り、mask してから伏せて出す。
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # CLAUDE.md のコマンドと揃える
+  WRANGLER_VERSION: 4.144.0
+
+jobs:
+  # ci.yml は別 workflow で needs にできず、タグの push では走らない。デプロイの前の検査をここでも回す
+  check:
+    name: check (exposure / fmt / clippy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash scripts/check-exposure.sh
+      - run: bash scripts/check-exposure-test.sh
+      - uses: dtolnay/rust-toolchain@1.92.0
+        with:
+          targets: wasm32-unknown-unknown
+          components: rustfmt, clippy
+      - uses: swatinem/rust-cache@v2
+        with:
+          shared-key: people-worker
+          save-if: false
+      - run: cargo fmt --all --check
+      - run: cargo clippy --locked --target wasm32-unknown-unknown --release -- -D warnings
+
+  dry-run:
+    name: wrangler deploy --dry-run
+    needs: [check]
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@1.92.0
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: swatinem/rust-cache@v2
+        with:
+          shared-key: people-worker
+          save-if: false
+      # wrangler.toml の [build] command と同じ版
+      - run: cargo install -q worker-build@0.8.7 --locked
+      - name: 本番 (トップレベル)
+        run: npx -y "wrangler@${WRANGLER_VERSION}" deploy --dry-run
+      - name: staging
+        run: npx -y "wrangler@${WRANGLER_VERSION}" deploy --dry-run --env staging
+
+  deploy-staging:
+    name: deploy staging
+    needs: [check]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: people-deploy-staging
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@1.92.0
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: swatinem/rust-cache@v2
+        with:
+          shared-key: people-worker
+          save-if: false
+      - run: cargo install -q worker-build@0.8.7 --locked
+      # wrangler の出力は $RUNNER_TEMP/deploy.log に取り、伏せてから出す (ログファイルそのものは出さない)。
+      #   - staging の URL (実ホスト名): ::add-mask:: + <staging> に置換
+      #   - 32 桁の hex (account ID): ::add-mask:: + <account> に置換
+      - name: wrangler deploy --env staging
+        id: deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          log="$RUNNER_TEMP/deploy.log"
+          status=0
+          npx -y "wrangler@${WRANGLER_VERSION}" deploy --env staging \
+            --tag "staging-${GITHUB_SHA::7}" --message "$GITHUB_SHA" >"$log" 2>&1 || status=$?
+          # 何かを出す前に mask を登録する
+          grep -oE '[0-9A-Fa-f]{32}' "$log" | sort -u | while read -r hex; do
+            echo "::add-mask::${hex}"
+          done
+          sed -E -e 's#[A-Za-z0-9.-]+\.workers\.dev#<workers-dev>#g' -e 's#[0-9A-Fa-f]{32}#<account>#g' "$log"
+          [ "$status" = 0 ] || exit "$status"
+          # staging も workers_dev = false なので workers.dev の URL は出ないはず (出たら公開されている)
+          if grep -qE '[A-Za-z0-9.-]+\.workers\.dev' "$log"; then
+            echo "::error::staging に workers.dev の URL が付いた (workers_dev = false のはず。直ちに止めること)"
+            exit 1
+          fi
+
+  deploy-prod:
+    name: deploy production
+    needs: [check]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    concurrency:
+      group: people-deploy-production
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@1.92.0
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: swatinem/rust-cache@v2
+        with:
+          shared-key: people-worker
+          save-if: false
+      - run: cargo install -q worker-build@0.8.7 --locked
+      - name: wrangler deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          log="$RUNNER_TEMP/deploy.log"
+          status=0
+          npx -y "wrangler@${WRANGLER_VERSION}" deploy \
+            --tag "$GITHUB_REF_NAME" --message "$GITHUB_SHA" >"$log" 2>&1 || status=$?
+          # 何かを出す前に mask を登録する
+          grep -oE '[0-9A-Fa-f]{32}' "$log" | sort -u | while read -r hex; do
+            echo "::add-mask::${hex}"
+          done
+          sed -E -e 's#[A-Za-z0-9.-]+\.workers\.dev#<workers-dev>#g' -e 's#[0-9A-Fa-f]{32}#<account>#g' "$log"
+          [ "$status" = 0 ] || exit "$status"
+          # 本番は workers_dev = false なので workers.dev の URL は出ないはず (出たら公開されている)
+          if grep -qE '[A-Za-z0-9.-]+\.workers\.dev' "$log"; then
+            echo "::error::本番に workers.dev の URL が付いた (workers_dev = false のはず。直ちに止めること)"
+            exit 1
+          fi

@@ -1,0 +1,107 @@
+name: CI
+
+# 社員・タイムカードの Worker alc-people の検査 (ippoan/alc-records-worker の ci.yml の形。
+# Refs ippoan/rust-alc-api#680)。
+# 公開範囲の検査・fmt・clippy・crates/people のテスト (純粋関数 + 実 DB)・coverage の gate・wasm のビルド。
+# デプロイは deploy.yml (別 workflow)。
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  # PR の古い run は捨てるが、main は途中で切らない
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # 先頭の check-exposure.sh は「外から素で届かない」(本番は workers_dev / preview_urls = false、
+  # route / routes 無し。どの env も workers_dev / preview_urls = true にしない) の検査 —
+  # この Worker は呼び手を認証しないので、崩れたら外から任意の tenant の社員・タイムカードに届く。
+  # check-exposure-test.sh はその陰性対照 (wrangler.toml を崩すと exit 1 になること)。
+  people-worker:
+    name: People Worker (wasm)
+    runs-on: ubuntu-latest
+    # 実 DB のテスト (crates/people/tests/*_db.rs) の接続先。runner の中の使い捨ての DB
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: test
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    steps:
+      - uses: actions/checkout@v4
+      - name: 外から直接届かないことの検査 (wrangler.toml)
+        run: bash scripts/check-exposure.sh
+      - name: check-exposure.sh の陰性対照
+        run: bash scripts/check-exposure-test.sh
+      - uses: dtolnay/rust-toolchain@1.92.0
+        with:
+          targets: wasm32-unknown-unknown
+          components: rustfmt, clippy, llvm-tools-preview
+      - uses: swatinem/rust-cache@v2
+        with:
+          shared-key: people-worker
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo fmt --all --check
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - run: cargo clippy --locked --target wasm32-unknown-unknown --release -- -D warnings
+      # テストの準備が流す SQL を ippoan/alc-migrations から取る (版は scripts/ALC_MIGRATIONS_REV)
+      - run: bash scripts/fetch-migrations.sh
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      # 単体テスト (純粋関数) と tests/*_db.rs (口から実 DB まで) を計測つきで 1 回だけ走らせる。
+      # テストの target ごとに本数を固定する (減ったら落ちる。テストを足したらここの数も上げる)。
+      # 接続文字列は runner の中の使い捨ての DB のもので、secret ではない。
+      - name: lib・timecard_db + Coverage 100% gate
+        env:
+          PEOPLE_TEST_ADMIN_DATABASE_URL: postgresql://postgres:test@localhost:5432/postgres
+          CARGO_TERM_COLOR: never
+        run: |
+          set -o pipefail
+          # 前の計測の残り (cache から戻った profraw) を数えない
+          cargo llvm-cov clean --workspace
+          cargo llvm-cov --locked -p people --no-report 2>&1 | tee "$RUNNER_TEMP/people-test.txt"
+          # target ごとの結果の行だけを見る (ほかの target の行と取り違えない)
+          awk '/Running unittests src\/lib\.rs \(/{f=1} f && /^test result:/{print; exit}' "$RUNNER_TEMP/people-test.txt" \
+            | grep -Eq '^test result: ok\. 6 passed; 0 failed; 0 ignored'
+          awk '/Running tests\/timecard_db\.rs \(/{f=1} f && /^test result:/{print; exit}' "$RUNNER_TEMP/people-test.txt" \
+            | grep -Eq '^test result: ok\. 8 passed; 0 failed; 0 ignored'
+          # -p を付けないと直下の package (worker) だけが対象になり、報告が空になる
+          cargo llvm-cov report --locked -p people --text > "$RUNNER_TEMP/people-cov.txt"
+          bash scripts/check_coverage_100.sh --use-cache "$RUNNER_TEMP/people-cov.txt"
+      # worker-build の版は wrangler.toml の [build] command と揃える
+      - run: cargo install -q worker-build@0.8.7 --locked
+      - run: worker-build --release
+      - name: bundle サイズ (上限 10MB は gzip 後)
+        run: |
+          raw=$(stat -c%s build/index_bg.wasm)
+          gz=$(gzip -9c build/index_bg.wasm | wc -c)
+          echo "alc-people wasm: raw=${raw} B / gzip=${gz} B" | tee -a "$GITHUB_STEP_SUMMARY"
+          [ "$gz" -lt 10000000 ] || { echo "::error::gzip 後 ${gz} B が 10MB を超えた"; exit 1; }
+
+  # green の PR を merge する (ippoan/ci-workflows の reusable。merge は GitHub App の token で行う)。
+  auto-merge:
+    name: Auto Merge
+    needs: [people-worker]
+    if: github.event_name == 'pull_request' && needs.people-worker.result == 'success'
+    uses: ippoan/ci-workflows/.github/workflows/auto-merge.yml@main
+    permissions:
+      contents: write
+      pull-requests: write
+      # 無いと startup_failure になる
+      checks: read
+    secrets:
+      CI_APP_ID: ${{ secrets.CI_APP_ID }}
+      CI_APP_PRIVATE_KEY: ${{ secrets.CI_APP_PRIVATE_KEY }}
