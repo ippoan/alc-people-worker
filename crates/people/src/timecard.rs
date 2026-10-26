@@ -27,12 +27,13 @@ use axum::http::{header, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{get, post, put};
 use axum::{Extension, Json, Router};
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio_postgres::types::{ToSql, Type};
 use tokio_postgres::{Error, Row};
 use uuid::Uuid;
 
+use crate::employees::Employee;
 use crate::{set_device_dev, AppState};
 
 /// 一括の上限 (rust の `alc_core::models::MAX_BULK_UPSERT_ITEMS`。社員の一括取り込みと共有する値)
@@ -140,30 +141,6 @@ pub struct DeleteResult {
 }
 
 impl TxOutput for DeleteResult {}
-
-/// rust の `Employee` (カードの照会の応答。`face_embedding` は rust と同じく出さない)
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct Employee {
-    pub id: Uuid,
-    pub tenant_id: Uuid,
-    pub code: Option<String>,
-    pub nfc_id: Option<String>,
-    pub name: String,
-    pub face_photo_url: Option<String>,
-    pub face_embedding_at: Option<DateTime<Utc>>,
-    pub face_model_version: Option<String>,
-    pub face_approval_status: String,
-    pub face_approved_by: Option<Uuid>,
-    pub face_approved_at: Option<DateTime<Utc>>,
-    pub license_issue_date: Option<NaiveDate>,
-    pub license_expiry_date: Option<NaiveDate>,
-    pub role: Vec<String>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-    pub deleted_at: Option<DateTime<Utc>>,
-}
-
-impl TxOutput for Employee {}
 
 /// rust の `TimePunchFilter`
 #[derive(Debug, Default, Deserialize)]
@@ -433,15 +410,9 @@ pub mod sql {
     pub const CARD_EMPLOYEE: &str =
         "SELECT employee_id FROM alc_api.timecard_cards WHERE tenant_id = $1 AND card_id = $2";
 
-    /// 免許証番号 (`employees.nfc_id`) から社員 (rust と同じく deleted_at は見ない。退職は下の `GET_EMPLOYEE` で弾く)
+    /// 免許証番号 (`employees.nfc_id`) から社員 (rust と同じく deleted_at は見ない。退職は `employees::sql::GET` で弾く)
     pub const EMPLOYEE_BY_NFC: &str =
         "SELECT id FROM alc_api.employees WHERE tenant_id = $1 AND nfc_id = $2";
-
-    /// 在籍の社員 1 人 (rust の `employees.get` と同じ `deleted_at IS NULL`)
-    pub const GET_EMPLOYEE: &str = "SELECT id, tenant_id, code, nfc_id, name, face_photo_url, face_embedding_at, \
-         face_model_version, face_approval_status, face_approved_by, face_approved_at, license_issue_date, \
-         license_expiry_date, role, created_at, updated_at, deleted_at \
-         FROM alc_api.employees WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL";
 
     /// 打刻の一覧の共通 CTE (rust の `PUNCHES_CTE` の写し。$1 = tenant)。
     /// - 打刻の一次表は `hub_measurements` だけ
@@ -569,28 +540,6 @@ fn card(r: &Row) -> TimecardCard {
         source: r.get(5),
         pending_employee_code: r.get(6),
         created_at: r.get(7),
-    }
-}
-
-fn employee(r: &Row) -> Employee {
-    Employee {
-        id: r.get(0),
-        tenant_id: r.get(1),
-        code: r.get(2),
-        nfc_id: r.get(3),
-        name: r.get(4),
-        face_photo_url: r.get(5),
-        face_embedding_at: r.get(6),
-        face_model_version: r.get(7),
-        face_approval_status: r.get(8),
-        face_approved_by: r.get(9),
-        face_approved_at: r.get(10),
-        license_issue_date: r.get(11),
-        license_expiry_date: r.get(12),
-        role: r.get(13),
-        created_at: r.get(14),
-        updated_at: r.get(15),
-        deleted_at: r.get(16),
     }
 }
 
@@ -894,11 +843,11 @@ pub async fn lookup_employee(
             };
             let row = tx
                 .query_typed_opt(
-                    sql::GET_EMPLOYEE,
+                    crate::employees::sql::GET,
                     &[(&tenant_id, Type::UUID), (&employee_id, Type::UUID)],
                 )
                 .await?;
-            Ok(row.as_ref().map(employee))
+            Ok(row.as_ref().map(crate::employees::employee))
         })
     })
     .await
