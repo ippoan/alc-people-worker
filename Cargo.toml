@@ -1,0 +1,42 @@
+# 社員・タイムカードの Worker `alc-people` (Refs ippoan/rust-alc-api#680)。
+# rust-alc-api の crates/alc-misc の timecard (W4d-a) と employees (W4d-b) を移す先。
+# 型は ippoan/alc-records-worker と同じ。直下の package が worker、route の crate は crates/people (同じ workspace・lock は直下の 1 つ)。
+#
+# 口・SQL は crates/people に在り、この Worker が持つのは DB への経路 (`src/db.rs`) と
+# workers-rs への載せ方 (`src/lib.rs`) だけ。
+[package]
+name = "alc-people-worker"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[workspace]
+members = ["crates/people"]
+
+# alc-core-wasm と alc-worker-db は ippoan/alc-worker-kit から引く。git 依存・rev 固定で、**2 つとも同じ rev**
+# (ippoan/alc-records-worker と同じ rev)。**書くのはここ 1 か所だけ** (worker と crates/people は `workspace = true` で継承する)。
+# 出どころが 2 つになると `PgClient` (alc-worker-db) などが別の型になり、コンパイルは通るのに全リクエストが 500 になる。
+# rev を上げるときは 2 つを一緒に上げ、Cargo.lock も一緒に更新する。
+[workspace.dependencies]
+alc-core-wasm = { git = "https://github.com/ippoan/alc-worker-kit", rev = "a256d2a84682d375dc649d3c4e0e2e91d38c17c2" }
+alc-worker-db = { git = "https://github.com/ippoan/alc-worker-kit", rev = "a256d2a84682d375dc649d3c4e0e2e91d38c17c2" }
+
+# 使わない依存は入れない
+[dependencies]
+alc-worker-db = { workspace = true }
+axum = { version = "0.8", default-features = false }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+people = { path = "crates/people" }
+tokio-postgres = { version = "0.7", default-features = false, features = ["js"] }
+tower-service = "0.3"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+worker = { version = "0.8", features = ["http", "axum", "tokio-postgres"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1

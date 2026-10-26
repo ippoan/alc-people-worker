@@ -1,0 +1,7 @@
+/target
+/build
+/node_modules
+/.wrangler
+.dev.vars*
+# scripts/fetch-migrations.sh が ippoan/alc-migrations から取り出す SQL (commit しない)
+/.alc-migrations

@@ -1,0 +1,26 @@
+name: Tag Release
+
+# 本番へのデプロイ用のタグ v* を手動で打つ (workflow_dispatch だけ。マージでは打たない —
+# マージ = staging、手動のタグ = 本番)。タグの push で deploy.yml が本番へデプロイする。
+# ippoan/alc-lineworks-worker の tag-release.yml の写し。最初の 1 回は bump=minor (v0.1.0)。
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: '上げる桁 (タグが 1 つも無いとき: patch → v0.0.1 / minor → v0.1.0 / major → v1.0.0)'
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+        default: patch
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    uses: ippoan/ci-workflows/.github/workflows/tag-release.yml@main
+    with:
+      bump: ${{ inputs.bump }}
+    secrets: inherit
