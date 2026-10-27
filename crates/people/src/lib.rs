@@ -4,15 +4,17 @@
 //!
 //! - [`employees`] — 社員 (CRUD・顔・免許証・照会・乗務員マスタの一括取り込み。取り込みは保留中のカードを同じ transaction で結ぶ)
 //! - [`timecard`] — カード台帳 (登録・一覧・取得・削除・社員番号キーの一括取り込み・同期の削除・カードから社員の照会) と
-//!   打刻の一覧・CSV (打刻の一次表は `hub_measurements`。書き込みは alc-devices の `POST /api/hub/measurements` に残る)
+//!   打刻の一覧・CSV (打刻の一次表は `hub_measurements`。書き込みは [`hub`])
+//! - [`hub`] — 端末の測定・打刻の取り込み (`POST /hub/measurements`。打刻はカードを社員に解決して凍結する) と一覧 (W6a)
 //!
 //! 全部の口が `X-Tenant-ID` を要る (auth-worker が付ける。無い・UUID でない → 401。`alc_core_wasm::require_tenant_header`)。
-//! rust と同じく role は見ない。dev端末の要求 (`X-Device-Dev: 1`) では打刻の一覧で `app.device_dev` を立てる
+//! rust と同じく role は見ない。dev端末の要求 (`X-Device-Dev: 1`) では打刻の一覧と測定の取り込み・一覧で `app.device_dev` を立てる
 //! (`hub_measurements`・`measurements`・`tenko_sessions` の RLS が dev の行と本番の行を分ける)。
 //! DB は `PgClient::tenant_tx` + `query_typed` 系だけ (名前付き prepared statement は使わない)。WHERE に tenant_id も書く
 //! (rust は RLS 任せだった)。ログ・エラー応答は固定の語だけ (エラーの文・識別子・card_id を載せない)。
 
 pub mod employees;
+pub mod hub;
 pub mod timecard;
 
 use std::sync::Arc;
@@ -67,6 +69,7 @@ pub fn router() -> Router<AppState> {
     // 後に足した route_layer が外側: slot を置く → tenant と dev の印を読む → 口
     let api = timecard::router()
         .merge(employees::router())
+        .merge(hub::router())
         .route_layer(middleware::from_fn(require_tenant_header))
         .route_layer(middleware::from_fn(with_device_dev_slot));
     Router::new().nest("/api", api)

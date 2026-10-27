@@ -1,8 +1,8 @@
 # alc-people-worker
 
 社員・タイムカードの Worker `alc-people` (Refs ippoan/rust-alc-api#680)。rust-alc-api の `crates/alc-misc` の
-timecard (W4d-a) と employees (W4d-b) を移す先で、path・method・JSON の形・status は rust と同じ
-(alc-app・運行管理者席・tc-ohishi のカード同期がそのまま使う)。口は `/api/timecard/...` (`crates/people/src/timecard.rs`) と `/api/employees/...` (`employees.rs`)。
+timecard (W4d-a)・employees (W4d-b)・端末の測定の取り込み `hub/measurements` (W6a) を移す先で、path・method・JSON の形・status は rust と同じ
+(alc-app・運行管理者席・tc-ohishi のカード同期がそのまま使う)。口は `/api/timecard/...` (`crates/people/src/timecard.rs`) と `/api/employees/...` (`employees.rs`)、`/api/hub/measurements` (`hub.rs`)。
 直下 = Worker (wasm 専用)、`crates/people/` = 口・SQL。
 
 **呼び手は auth-worker の Service Binding だけ** (auth-worker が JWT / 端末の鍵 / RPC を検証し `X-Tenant-ID`・`X-Device-Dev` を
@@ -26,13 +26,13 @@ DB テストは使い捨ての postgres:17 へ。URL が無ければ失敗 (skip
   DB の失敗は `people: <段> failed: db (<kind>)`。応答の本文は rust と同じ (多くは空、一括の 2 口は文字列)。
 - **card_id の正規化は `timecard::normalize_card_id` の 1 か所** (打刻の一覧の SQL の `lower(replace(btrim(..), ':', ''))` と
   同じ規則。片方だけ変えると照合が静かに外れる)。カードの照会 (`/timecard/cards/lookup`) に書き込みを足さない。
-- dev端末の要求 (`X-Device-Dev: 1`) は打刻の一覧・CSV で `app.device_dev` を立てる (`hub_measurements` 等の RLS)。
-- 打刻の書き込みはこの Worker に無い (alc-devices の `POST /api/hub/measurements`)。
+- dev端末の要求 (`X-Device-Dev: 1`) は打刻の一覧・CSV と測定の取り込み・一覧で `app.device_dev` を立てる (`hub_measurements` 等の RLS。取り込みは列 `is_dev` の既定値で入る)。試験記録 (`kind = "test"`) は dev の軸だけ。
+- 打刻 (`kind = "timecard"`) は取り込みの時点でカードを社員に解決し、payload の `employee_id` に凍結する (`hub::freeze_employee_ids`。照合はカードの照会と同じ SQL。端末の申告の `employee_id` は kind を問わず捨てる。解決できなくても行は入れる)。kind の allowlist に無い kind は 400 で端末が再送し続けるので、**新しい kind は端末より先に `hub::HUB_MEASUREMENT_KINDS` へ**。
 - 社員の一括取り込み (`bulk-by-code`) は、保留中のカード (timecard の一括取り込みが入れた `employee_id IS NULL` の行) を
   **同じ transaction で**結ぶ (`employees::sql::LINK_PENDING_CARDS`)。社員が居る経路すべてで結ぶ。照会の口 (`/employees/lookup`) に書き込みを足さない。
 - role は見ない (rust も `X-Tenant-ID` だけ)。
 - DB は `PgClient::tenant_tx` + `query_typed` 系だけ。名前付き prepared statement 禁止。Row を tx の外へ出さない。
   WHERE に tenant_id も明示する。SQL の意味は rust の repo と同じにする。`dry_run` は SAVEPOINT へ戻して書かない。
-- `coverage_100.toml` の登録を外さない。CI の本数 (lib 8・timecard_db 8・employees_db 5) はテストを足したら上げる。
+- `coverage_100.toml` の登録を外さない。CI の本数 (lib 12・timecard_db 8・employees_db 5・hub_db 6) はテストを足したら上げる。
 - public repo: ホスト名・tenant UUID・個人情報を書かない。`v*` タグ = 本番 (Tag Release 手動)。
 - kit の rev は直下 `Cargo.toml` の 1 か所 (alc-records-worker と同じ rev)。

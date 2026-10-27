@@ -18,3 +18,7 @@ path = "crates/people/src/timecard.rs"
 # 社員 (CRUD・顔・免許証・照会・乗務員マスタの一括取り込みと保留カードの結び付け)
 [[files]]
 path = "crates/people/src/employees.rs"
+
+# 端末の測定・打刻の取り込みと一覧 (W6a。打刻はカードを社員に解決して凍結する)
+[[files]]
+path = "crates/people/src/hub.rs"
