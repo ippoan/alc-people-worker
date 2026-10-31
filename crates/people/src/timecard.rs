@@ -174,6 +174,10 @@ pub struct Punch {
     pub alcohol_level: Option<f64>,
     pub result: Option<String>,
     pub tenko_recorded: Option<bool>,
+    /// 結ばれた測定の点呼の方法 (`通常点呼` / `IT点呼` / `遠隔点呼` / `自動点呼`)。点呼になっていなければ None
+    pub tenko_method: Option<String>,
+    /// IT点呼 を運行管理者が通話 (`it`) と対面 (`in_person`) のどちらで確定したか。未確定・IT点呼 でなければ None
+    pub manager_judgment_method: Option<String>,
 }
 
 impl TxOutput for Punch {}
@@ -491,6 +495,24 @@ CASE WHEN m.id IS NOT NULL THEN EXISTS (
 ) END AS tenko_recorded
 "#;
 
+    /// 一覧だけに足す点呼の区分 (CSV は `tenko_recorded` までで、列を変えない)。
+    /// 1 つの測定に点呼が複数あるときは新しい方
+    const PUNCH_TENKO_METHOD_COLUMNS: &str = r#"
+, ts_m.tenko_method, ts_m.manager_judgment_method
+"#;
+
+    const PUNCH_TENKO_METHOD_JOIN: &str = r#"
+LEFT JOIN LATERAL (
+    SELECT ts.tenko_method, ts.manager_judgment_method
+    FROM alc_api.tenko_sessions ts
+    WHERE ts.tenant_id = m.tenant_id
+      AND ts.is_dev = m.is_dev
+      AND ts.measurement_id = m.id
+    ORDER BY ts.created_at DESC
+    LIMIT 1
+) ts_m ON TRUE
+"#;
+
     /// 絞り込み ($2 = 社員、$3 = 以降、$4 = 以前。どれも NULL なら絞らない)
     const PUNCH_WHERE: &str = " WHERE p.tenant_id = $1 \
          AND ($2::uuid IS NULL OR p.employee_id = $2) \
@@ -507,8 +529,10 @@ CASE WHEN m.id IS NOT NULL THEN EXISTS (
            p.hub_device_id AS device_name, p.card_id, p.kind, p.card_kind, \
            e.name AS employee_name, p.punched_at, p.created_at, ",
         PUNCH_MEASUREMENT_COLUMNS,
+        PUNCH_TENKO_METHOD_COLUMNS,
         " FROM p LEFT JOIN alc_api.employees e ON e.id = p.employee_id ",
         PUNCH_MEASUREMENT_JOIN,
+        PUNCH_TENKO_METHOD_JOIN,
         PUNCH_WHERE,
         " ORDER BY p.punched_at DESC LIMIT $5 OFFSET $6"
     );
@@ -560,6 +584,8 @@ fn punch(r: &Row) -> Punch {
         alcohol_level: r.get(12),
         result: r.get(13),
         tenko_recorded: r.get(14),
+        tenko_method: r.get(15),
+        manager_judgment_method: r.get(16),
     }
 }
 

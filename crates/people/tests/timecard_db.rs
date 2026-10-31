@@ -597,8 +597,9 @@ async fn punches_list_and_csv() {
     admin()
         .await
         .execute(
-            "INSERT INTO alc_api.tenko_sessions (tenant_id, employee_id, tenko_type, status, measurement_id, is_dev) \
-             VALUES ($1, $2, 'normal', 'completed', $3, false)",
+            "INSERT INTO alc_api.tenko_sessions (tenant_id, employee_id, tenko_type, status, measurement_id, is_dev, \
+             tenko_method, manager_judgment_method) \
+             VALUES ($1, $2, 'normal', 'completed', $3, false, 'IT点呼', 'in_person')",
             &[&t, &emp, &m_fail],
         )
         .await
@@ -721,6 +722,10 @@ async fn punches_list_and_csv() {
     assert_eq!(by(r5)["result"], "fail");
     assert_eq!(by(r5)["tenko_recorded"], true);
     assert!(by(r1)["tenko_recorded"].is_null());
+    assert_eq!(by(r5)["tenko_method"], "IT点呼");
+    assert_eq!(by(r5)["manager_judgment_method"], "in_person");
+    assert!(by(r1)["tenko_method"].is_null());
+    assert!(by(r1)["manager_judgment_method"].is_null());
     assert_eq!(by(r1)["punched_at"], "2026-01-01T00:00:10Z");
 
     // 頁と絞り込み
