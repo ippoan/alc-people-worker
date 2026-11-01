@@ -639,13 +639,11 @@ mod tests {
         for kind in VITAL_KINDS {
             assert_eq!(
                 measurement_link(&rec(kind, both.clone(), Some("b-1"))),
-                (Some(id), None),
-                "{kind}"
+                (Some(id), None)
             );
             assert_eq!(
                 measurement_link(&rec(kind, only_mid.clone(), None)),
-                (None, None),
-                "{kind}"
+                (None, None)
             );
         }
         // ほかの kind は結ばない
