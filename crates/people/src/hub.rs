@@ -76,6 +76,35 @@ const FIELD_EMPLOYEE_ID: &str = "employee_id";
 const FIELD_MEASUREMENT_ID: &str = "measurement_id";
 /// 測定に結ぶ生の記録の kind (打刻のほか)。点呼中に CoreS3 が測った値
 const VITAL_KINDS: &[&str] = &["temperature", "blood_pressure", "alcohol"];
+/// 端末の時計として受ける下限 (2020-01-01T00:00:00Z)。CoreS3 は時計が合う前の記録を 1970 起点の稼働時間で送るので、
+/// これより前は捨てて列を NULL にする (読む側は受信の時刻 `created_at` を使う)
+const MIN_DEVICE_TIME_MS: i64 = 1_577_836_800_000;
+
+/// 記録の時刻の出どころ。`device` = 端末の時計 (`recorded_at`)、`received` = 受信の時刻 (`created_at`。
+/// 端末が送らなかったか、時計が合う前だった)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TimeSource {
+    Device,
+    Received,
+}
+
+impl TimeSource {
+    /// 列 `recorded_at` が NULL なら受信の時刻
+    pub fn of(recorded_at_is_null: bool) -> Self {
+        if recorded_at_is_null {
+            TimeSource::Received
+        } else {
+            TimeSource::Device
+        }
+    }
+}
+
+/// 端末の時計を列 `recorded_at` の値にする ([`MIN_DEVICE_TIME_MS`] より前と範囲外は NULL)
+fn device_recorded_at(ms: Option<i64>) -> Option<DateTime<Utc>> {
+    ms.filter(|ms| *ms >= MIN_DEVICE_TIME_MS)
+        .and_then(DateTime::from_timestamp_millis)
+}
 
 pub mod sql {
     /// 1 行入れる (同じ軸の再送は入れない)。is_dev は列の既定値 (`app.device_dev`) で入る。
@@ -124,7 +153,7 @@ pub struct HubMeasurementCreate {
     pub device_id: String,
     pub kind: String,
     pub seq: i64,
-    /// 端末の時計 (unix ms)。範囲外は NULL にする
+    /// 端末の時計 (unix ms)。2020 年より前 (時計が合う前) と範囲外は NULL にする
     pub recorded_at_ms: Option<i64>,
     #[serde(default)]
     pub session_id: Option<String>,
@@ -171,6 +200,8 @@ pub struct HubMeasurement {
     pub machine_id: String,
     pub recorded_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
+    /// `recorded_at` が端末の時計か (NULL なら受信の時刻 `created_at` で読む)
+    pub recorded_at_source: TimeSource,
 }
 
 impl TxOutput for HubMeasurement {}
@@ -317,9 +348,7 @@ pub async fn insert_batch(
             set_device_dev(tx, dev).await?;
             let mut inserted: i64 = 0;
             for item in &items {
-                let recorded_at = item
-                    .recorded_at_ms
-                    .and_then(DateTime::from_timestamp_millis);
+                let recorded_at = device_recorded_at(item.recorded_at_ms);
                 let (measurement_id, employee_id) = measurement_link(item);
                 let args: [(&(dyn ToSql + Sync), Type); 10] = [
                     (&tenant_id, Type::UUID),
@@ -343,6 +372,7 @@ pub async fn insert_batch(
 }
 
 fn measurement(r: &Row) -> HubMeasurement {
+    let recorded_at: Option<DateTime<Utc>> = r.get(9);
     HubMeasurement {
         id: r.get(0),
         tenant_id: r.get(1),
@@ -353,8 +383,9 @@ fn measurement(r: &Row) -> HubMeasurement {
         session_id: r.get(6),
         via_device_id: r.get(7),
         machine_id: r.get(8),
-        recorded_at: r.get(9),
+        recorded_at,
         created_at: r.get(10),
+        recorded_at_source: TimeSource::of(recorded_at.is_none()),
     }
 }
 
@@ -528,6 +559,21 @@ mod tests {
             via_device_id: None,
             payload: json!({}),
         }
+    }
+
+    #[test]
+    fn device_time_before_2020_is_dropped() {
+        assert_eq!(device_recorded_at(None), None);
+        assert_eq!(device_recorded_at(Some(335_264)), None);
+        assert_eq!(device_recorded_at(Some(MIN_DEVICE_TIME_MS - 1)), None);
+        assert_eq!(device_recorded_at(Some(i64::MAX)), None);
+        assert_eq!(
+            device_recorded_at(Some(MIN_DEVICE_TIME_MS)),
+            Some("2020-01-01T00:00:00Z".parse().unwrap())
+        );
+        assert_eq!(TimeSource::of(true), TimeSource::Received);
+        assert_eq!(TimeSource::of(false), TimeSource::Device);
+        assert_eq!(json!(TimeSource::Received), json!("received"));
     }
 
     #[test]
