@@ -817,11 +817,11 @@ async fn punches_list_and_csv() {
     assert_eq!(lines.len(), 6);
     assert_eq!(
         lines[1],
-        format!("{r5},打刻,,P001,打刻 太郎,2026-01-01 09:00:50,browser,{m_fail},0.15,fail,済")
+        format!("{r5},打刻,,P001,打刻 太郎,2026-01-01 09:00:50,browser,{m_fail},0.15,fail,済,端末")
     );
     assert_eq!(
         lines[4],
-        format!("{r2},打刻,ICカード,,,2026-01-01 09:00:20,cores3-1,,,,")
+        format!("{r2},打刻,ICカード,,,2026-01-01 09:00:20,cores3-1,,,,,端末")
     );
     assert_eq!(lines[3].split(',').nth(1), Some("打刻"));
     assert_eq!(lines[2].split(',').nth(1), Some("点呼"));
@@ -984,7 +984,7 @@ async fn punches_carry_tenko_status_and_method() {
             .find(|l| l.starts_with(&id.to_string()))
             .unwrap()
             .rsplit(',')
-            .next()
+            .nth(1) // 末尾は「打刻日時の出どころ」、その前が「点呼記録」
             .unwrap()
             .to_owned()
     };
