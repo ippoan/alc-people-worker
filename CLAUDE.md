@@ -27,12 +27,12 @@ DB テストは使い捨ての postgres:17 へ。URL が無ければ失敗 (skip
 - **card_id の正規化は `timecard::normalize_card_id` の 1 か所** (打刻の一覧の SQL の `lower(replace(btrim(..), ':', ''))` と
   同じ規則。片方だけ変えると照合が静かに外れる)。カードの照会 (`/timecard/cards/lookup`) に書き込みを足さない。
 - dev端末の要求 (`X-Device-Dev: 1`) は打刻の一覧・CSV と測定の取り込み・一覧で `app.device_dev` を立てる (`hub_measurements` 等の RLS。取り込みは列 `is_dev` の既定値で入る)。試験記録 (`kind = "test"`) は dev の軸だけ。
-- 打刻 (`kind = "timecard"`) は取り込みの時点でカードを社員に解決し、payload の `employee_id` に凍結する (`hub::freeze_employee_ids`。照合はカードの照会と同じ SQL。端末の申告の `employee_id` は kind を問わず捨てる。解決できなくても行は入れる)。打刻が載せた測定の id は、同じ tenant・軸・社員の測定が在るときだけ列 `measurement_id` (外部キー) にも書く (`hub::sql::INSERT` のサブクエリ。無い id で外部キー違反にしてバッチごと落とさない)。打刻の一覧・CSV はこの列で測定と点呼に結ぶ (payload の文字列では結ばない)。kind の allowlist に無い kind は 400 で端末が再送し続けるので、**新しい kind は端末より先に `hub::HUB_MEASUREMENT_KINDS` へ**。
+- 打刻 (`kind = "timecard"`) は取り込みの時点でカードを社員に解決し、payload の `employee_id` に凍結する (`hub::freeze_employee_ids`。照合はカードの照会と同じ SQL。端末の申告の `employee_id` は kind を問わず捨てる。解決できなくても行は入れる)。payload が載せた測定の id は、同じ tenant・軸の測定が在るときだけ列 `measurement_id` (外部キー) にも書く (打刻は凍結した社員の測定に限る。体温・血圧・アルコールは点呼のセッションの中の記録に限り、社員は照合しない = `hub::measurement_link`) (`hub::sql::INSERT` のサブクエリ。無い id で外部キー違反にしてバッチごと落とさない)。打刻の一覧・CSV はこの列で測定と点呼に結ぶ (payload の文字列では結ばない)。kind の allowlist に無い kind は 400 で端末が再送し続けるので、**新しい kind は端末より先に `hub::HUB_MEASUREMENT_KINDS` へ**。
 - 社員の一括取り込み (`bulk-by-code`) は、保留中のカード (timecard の一括取り込みが入れた `employee_id IS NULL` の行) を
   **同じ transaction で**結ぶ (`employees::sql::LINK_PENDING_CARDS`)。社員が居る経路すべてで結ぶ。照会の口 (`/employees/lookup`) に書き込みを足さない。
 - role は見ない (rust も `X-Tenant-ID` だけ)。
 - DB は `PgClient::tenant_tx` + `query_typed` 系だけ。名前付き prepared statement 禁止。Row を tx の外へ出さない。
   WHERE に tenant_id も明示する。SQL の意味は rust の repo と同じにする。`dry_run` は SAVEPOINT へ戻して書かない。
-- `coverage_100.toml` の登録を外さない。CI の本数 (lib 12・timecard_db 9・employees_db 5・hub_db 7) はテストを足したら上げる。
+- `coverage_100.toml` の登録を外さない。CI の本数 (lib 13・timecard_db 9・employees_db 5・hub_db 7) はテストを足したら上げる。
 - public repo: ホスト名・tenant UUID・個人情報を書かない。`v*` タグ = 本番 (Tag Release 手動)。
 - kit の rev は直下 `Cargo.toml` の 1 か所 (alc-records-worker と同じ rev)。

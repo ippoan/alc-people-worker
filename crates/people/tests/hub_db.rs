@@ -13,6 +13,12 @@ fn m(device: &str, kind: &str, seq: i64, payload: Value) -> Value {
     json!({ "device_id": device, "kind": kind, "seq": seq, "payload": payload })
 }
 
+/// 点呼のセッションの中の記録にする (CoreS3 が点呼ごとに発番する session_id)
+fn in_session(mut v: Value) -> Value {
+    v["session_id"] = json!("boot1-1");
+    v
+}
+
 async fn post(app: &support::App, t: Uuid, body: Value, dev: bool) -> support::Got {
     let headers: &[(&str, &str)] = if dev { &[("X-Device-Dev", "1")] } else { &[] };
     call_with(app, "POST", URI, Some(t), headers, Some(body)).await
@@ -242,7 +248,8 @@ async fn measurement(t: Uuid, employee: Uuid, is_dev: bool) -> Uuid {
 }
 
 /// 打刻が載せた測定の id は、同じ tenant・軸・凍結した社員の測定が在るときだけ列 `measurement_id` に入る。
-/// 合わない id・無い id・uuid でない値・打刻でない kind は NULL で、行は入る (外部キーの違反でまとめて落ちない)
+/// 点呼の中の体温・血圧・アルコールは社員を照合せずに入る。合わない id・無い id・uuid でない値・セッションの外の記録・
+/// ほかの kind は NULL で、行は入る (外部キーの違反でまとめて落ちない)
 #[tokio::test]
 async fn timecard_links_measurement() {
     let app = support::app().await;
@@ -279,9 +286,24 @@ async fn timecard_links_measurement() {
             json!({ "card_id": "ffffffffffffffff", "measurement_id": m_ok })
         ),
         m("tc", "alcohol", 8, json!({ "measurement_id": m_ok })),
+        // 点呼の中の体温・血圧・アルコール (CoreS3 が載せる) は社員を照合せずに結ぶ。別の tenant の測定は結ばない
+        in_session(m("tc", "alcohol", 9, json!({ "measurement_id": m_other }))),
+        in_session(m(
+            "tc",
+            "temperature",
+            10,
+            json!({ "measurement_id": m_ok })
+        )),
+        in_session(m(
+            "tc",
+            "blood_pressure",
+            11,
+            json!({ "measurement_id": m_other_tenant })
+        )),
+        in_session(m("tc", "license", 12, json!({ "measurement_id": m_ok }))),
     ]);
     let got = post(&app, t, body, false).await;
-    assert_eq!(got.json(), json!({ "inserted": 8, "duplicates": 0 }));
+    assert_eq!(got.json(), json!({ "inserted": 12, "duplicates": 0 }));
     let got = post(
         &app,
         t,
@@ -313,6 +335,10 @@ async fn timecard_links_measurement() {
             (6, false, None),
             (7, false, None),
             (8, false, None),
+            (9, false, Some(m_other)),
+            (10, false, Some(m_ok)),
+            (11, false, None),
+            (12, false, None),
             (1, true, Some(m_dev)),
         ]
     );

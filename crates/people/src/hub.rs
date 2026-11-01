@@ -10,8 +10,9 @@
 //! (打刻の一覧 [`crate::timecard`] はこの値を読む。後からカードを付け替えても過去の打刻は動かない)。
 //! 照合はカードの照会と同じ規則 ([`crate::timecard::normalize_card_id`] → 台帳 → 免許証番号)。端末が名乗った
 //! `employee_id` は kind を問わず捨てる。解決できなくても (未登録・DB の失敗) 行は入れる。
-//! 打刻が載せた測定の id (`measurement_id`、画面が始めていた測定) は、同じ tenant・軸・凍結した社員の測定が在るときだけ
-//! 列 `measurement_id` (測定への外部キー) にも書く。打刻の一覧と CSV はこの列で測定と点呼に結ぶ。
+//! payload が載せた測定の id (`measurement_id`、画面が始めていた測定) は、同じ tenant・軸の測定が在るときだけ
+//! 列 `measurement_id` (測定への外部キー) にも書く。打刻は凍結した社員の測定に限り、体温・血圧・アルコールは点呼の
+//! セッションの中の記録に限る ([`measurement_link`])。打刻の一覧と CSV はこの列で測定と点呼に結ぶ。
 //!
 //! dev端末の要求 (`X-Device-Dev: 1`) では `app.device_dev` を立てる (列 `is_dev` の既定値と RLS が dev の行と本番の行を分ける)。
 //! 試験記録 (`kind = "test"`) は dev の軸のときだけ受ける。
@@ -70,19 +71,23 @@ pub const MAX_LIST_LIMIT: i64 = 200;
 const FIELD_CARD_ID: &str = "card_id";
 /// 取り込みの時点で凍結する「解決した社員」のキー (**サーバが書く。端末の申告は必ず捨てる**)
 const FIELD_EMPLOYEE_ID: &str = "employee_id";
-/// 打刻の payload の「画面が始めていた測定」のキー (alc-app が載せる。列 `measurement_id` の候補)
+/// payload の「画面が始めていた測定」のキー (列 `measurement_id` の候補)。打刻は alc-app が、体温・血圧・アルコールは
+/// 点呼中の CoreS3 が載せる (画面が USB で `TENKO MID <id>` を渡す)
 const FIELD_MEASUREMENT_ID: &str = "measurement_id";
+/// 測定に結ぶ生の記録の kind (打刻のほか)。点呼中に CoreS3 が測った値
+const VITAL_KINDS: &[&str] = &["temperature", "blood_pressure", "alcohol"];
 
 pub mod sql {
     /// 1 行入れる (同じ軸の再送は入れない)。is_dev は列の既定値 (`app.device_dev`) で入る。
     /// $1 tenant_id / $2 device_id / $3 kind / $4 payload / $5 seq / $6 recorded_at / $7 session_id / $8 via_device_id /
-    /// $9 打刻が載せた測定の id / $10 凍結した社員。列 `measurement_id` は、同じ tenant・同じ軸・同じ社員の測定が
-    /// 在るときだけ入れる (無ければ NULL。外部キーの違反でまとめて落として端末に再送させない)
+    /// $9 payload が載せた測定の id / $10 凍結した社員 (打刻だけ。体温などは NULL)。列 `measurement_id` は、同じ tenant・
+    /// 同じ軸 (打刻なら同じ社員も) の測定が在るときだけ入れる (無ければ NULL。外部キーの違反でまとめて落として端末に
+    /// 再送させない)。どの kind で何を渡すかは [`super::measurement_link`]
     pub const INSERT: &str = "INSERT INTO alc_api.hub_measurements \
          (tenant_id, device_id, kind, payload, seq, recorded_at, session_id, via_device_id, measurement_id) \
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, ( \
              SELECT m.id FROM alc_api.measurements m \
-              WHERE m.tenant_id = $1 AND m.id = $9 AND m.employee_id = $10 \
+              WHERE m.tenant_id = $1 AND m.id = $9 AND ($10::uuid IS NULL OR m.employee_id = $10) \
                 AND m.is_dev = (coalesce(current_setting('app.device_dev', true), '') = '1'))) \
          ON CONFLICT (tenant_id, device_id, seq, is_dev) DO NOTHING";
 
@@ -239,16 +244,30 @@ fn timecard_card_id(item: &HubMeasurementCreate) -> Option<String> {
         .flatten()
 }
 
-/// 打刻の payload の uuid の値 (ハイフン区切りの 36 文字のときだけ。打刻の一覧の SQL が見ていた形と同じ)。
-/// 打刻でなければ None (測定に結ぶのは打刻だけ)
-fn timecard_uuid(item: &HubMeasurementCreate, key: &str) -> Option<Uuid> {
-    if item.kind != KIND_TIMECARD {
-        return None;
-    }
+/// payload の uuid の値 (ハイフン区切りの 36 文字のときだけ。打刻の一覧の SQL が見ていた形と同じ)
+fn payload_uuid(item: &HubMeasurementCreate, key: &str) -> Option<Uuid> {
     let raw = item.payload.get(key)?.as_str()?;
     (raw.len() == 36)
         .then(|| Uuid::parse_str(raw).ok())
         .flatten()
+}
+
+/// 列 `measurement_id` の候補と、照合に使う社員 ([`sql::INSERT`] の $9・$10)。
+/// - 打刻: 凍結した社員が居るときだけ (社員も照合する。カードが未登録なら結ばない)
+/// - 体温・血圧・アルコール: 点呼のセッションの中の記録だけ (CoreS3 は点呼中にしか載せない)。社員は持たないので照合しない
+/// - それ以外の kind: 結ばない
+fn measurement_link(item: &HubMeasurementCreate) -> (Option<Uuid>, Option<Uuid>) {
+    let measurement_id = payload_uuid(item, FIELD_MEASUREMENT_ID);
+    if item.kind == KIND_TIMECARD {
+        match payload_uuid(item, FIELD_EMPLOYEE_ID) {
+            Some(employee_id) => (measurement_id, Some(employee_id)),
+            None => (None, None),
+        }
+    } else if VITAL_KINDS.contains(&item.kind.as_str()) && item.session_id.is_some() {
+        (measurement_id, None)
+    } else {
+        (None, None)
+    }
 }
 
 // --- DB ---
@@ -301,8 +320,7 @@ pub async fn insert_batch(
                 let recorded_at = item
                     .recorded_at_ms
                     .and_then(DateTime::from_timestamp_millis);
-                let measurement_id = timecard_uuid(item, FIELD_MEASUREMENT_ID);
-                let employee_id = timecard_uuid(item, FIELD_EMPLOYEE_ID);
+                let (measurement_id, employee_id) = measurement_link(item);
                 let args: [(&(dyn ToSql + Sync), Type); 10] = [
                     (&tenant_id, Type::UUID),
                     (&item.device_id, Type::TEXT),
@@ -595,17 +613,60 @@ mod tests {
             timecard_card_id(&card("alcohol", json!({ "card_id": "AA" }))),
             None
         );
+    }
+
+    #[test]
+    fn measurement_link_by_kind() {
         let id = Uuid::new_v4();
-        let mid = |kind: &str, v: Value| {
-            timecard_uuid(
-                &card(kind, json!({ "measurement_id": v })),
+        let emp = Uuid::new_v4();
+        let rec = |kind: &str, payload: Value, session: Option<&str>| HubMeasurementCreate {
+            payload,
+            session_id: session.map(str::to_owned),
+            ..item(kind, 0, "d")
+        };
+        let both = json!({ "measurement_id": id.to_string(), "employee_id": emp.to_string() });
+        let only_mid = json!({ "measurement_id": id.to_string() });
+        // 打刻: 社員が居るときだけ、社員つきで
+        assert_eq!(
+            measurement_link(&rec(KIND_TIMECARD, both.clone(), None)),
+            (Some(id), Some(emp))
+        );
+        assert_eq!(
+            measurement_link(&rec(KIND_TIMECARD, only_mid.clone(), None)),
+            (None, None)
+        );
+        // 体温・血圧・アルコール: セッションの中だけ、社員なしで
+        for kind in VITAL_KINDS {
+            assert_eq!(
+                measurement_link(&rec(kind, both.clone(), Some("b-1"))),
+                (Some(id), None),
+                "{kind}"
+            );
+            assert_eq!(
+                measurement_link(&rec(kind, only_mid.clone(), None)),
+                (None, None),
+                "{kind}"
+            );
+        }
+        // ほかの kind は結ばない
+        assert_eq!(
+            measurement_link(&rec("license", both.clone(), Some("b-1"))),
+            (None, None)
+        );
+        assert_eq!(
+            measurement_link(&rec("fc1200_raw", both, Some("b-1"))),
+            (None, None)
+        );
+        // uuid の形
+        let mid = |v: Value| {
+            payload_uuid(
+                &rec("alcohol", json!({ "measurement_id": v }), None),
                 FIELD_MEASUREMENT_ID,
             )
         };
-        assert_eq!(mid(KIND_TIMECARD, json!(id.to_string())), Some(id));
-        assert_eq!(mid(KIND_TIMECARD, json!(id.simple().to_string())), None);
-        assert_eq!(mid(KIND_TIMECARD, json!("x".repeat(36))), None);
-        assert_eq!(mid(KIND_TIMECARD, json!(1)), None);
-        assert_eq!(mid("alcohol", json!(id.to_string())), None);
+        assert_eq!(mid(json!(id.to_string())), Some(id));
+        assert_eq!(mid(json!(id.simple().to_string())), None);
+        assert_eq!(mid(json!("x".repeat(36))), None);
+        assert_eq!(mid(json!(1)), None);
     }
 }
