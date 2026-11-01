@@ -229,6 +229,95 @@ async fn timecard_freezes_employee() {
     support::assert_logs_clean(&app, &["ffffffffffffffff".into(), t.to_string()]);
 }
 
+async fn measurement(t: Uuid, employee: Uuid, is_dev: bool) -> Uuid {
+    admin()
+        .await
+        .query_one(
+            "INSERT INTO alc_api.measurements (tenant_id, employee_id, is_dev) VALUES ($1, $2, $3) RETURNING id",
+            &[&t, &employee, &is_dev],
+        )
+        .await
+        .unwrap()
+        .get(0)
+}
+
+/// 打刻が載せた測定の id は、同じ tenant・軸・凍結した社員の測定が在るときだけ列 `measurement_id` に入る。
+/// 合わない id・無い id・uuid でない値・打刻でない kind は NULL で、行は入る (外部キーの違反でまとめて落ちない)
+#[tokio::test]
+async fn timecard_links_measurement() {
+    let app = support::app().await;
+    let t = tenant().await;
+    let other_t = tenant().await;
+    let emp = employee(t, "打刻 三郎").await;
+    let other = employee(t, "打刻 四郎").await;
+    let got = call(
+        &app,
+        "POST",
+        "/api/timecard/cards",
+        Some(t),
+        Some(json!({ "employee_id": emp, "card_id": "0123456789abcdef" })),
+    )
+    .await;
+    assert_eq!(got.status, 201);
+    let m_ok = measurement(t, emp, false).await;
+    let m_other = measurement(t, other, false).await;
+    let m_dev = measurement(t, emp, true).await;
+    let m_other_tenant = measurement(other_t, employee(other_t, "別 太郎").await, false).await;
+    let card = |mid: Value| json!({ "card_id": "0123456789abcdef", "measurement_id": mid });
+
+    let body = json!([
+        m("tc", "timecard", 1, card(json!(m_ok))),
+        m("tc", "timecard", 2, card(json!(m_other))),
+        m("tc", "timecard", 3, card(json!(Uuid::new_v4()))),
+        m("tc", "timecard", 4, card(json!("not-a-uuid"))),
+        m("tc", "timecard", 5, card(json!(m_dev))),
+        m("tc", "timecard", 6, card(json!(m_other_tenant))),
+        m(
+            "tc",
+            "timecard",
+            7,
+            json!({ "card_id": "ffffffffffffffff", "measurement_id": m_ok })
+        ),
+        m("tc", "alcohol", 8, json!({ "measurement_id": m_ok })),
+    ]);
+    let got = post(&app, t, body, false).await;
+    assert_eq!(got.json(), json!({ "inserted": 8, "duplicates": 0 }));
+    let got = post(
+        &app,
+        t,
+        json!([m("tc", "timecard", 1, card(json!(m_dev)))]),
+        true,
+    )
+    .await;
+    assert_eq!(got.json(), json!({ "inserted": 1, "duplicates": 0 }));
+
+    let linked: Vec<(i64, bool, Option<Uuid>)> = admin()
+        .await
+        .query(
+            "SELECT seq, is_dev, measurement_id FROM alc_api.hub_measurements WHERE tenant_id = $1 ORDER BY is_dev, seq",
+            &[&t],
+        )
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| (r.get(0), r.get(1), r.get(2)))
+        .collect();
+    assert_eq!(
+        linked,
+        vec![
+            (1, false, Some(m_ok)),
+            (2, false, None),
+            (3, false, None),
+            (4, false, None),
+            (5, false, None),
+            (6, false, None),
+            (7, false, None),
+            (8, false, None),
+            (1, true, Some(m_dev)),
+        ]
+    );
+}
+
 /// 一覧: 受信の新しい順・絞り込み・1 件多く引いて has_more。鍵の ID で絞ると結び付いた hub の行も返し、
 /// hub の行の machine_id は鍵の ID に畳む
 #[tokio::test]
