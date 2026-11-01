@@ -34,6 +34,7 @@ use tokio_postgres::{Error, Row};
 use uuid::Uuid;
 
 use crate::employees::Employee;
+use crate::hub::TimeSource;
 use crate::{set_device_dev, AppState};
 
 /// 一括の上限 (rust の `alc_core::models::MAX_BULK_UPSERT_ITEMS`。社員の一括取り込みと共有する値)
@@ -169,6 +170,8 @@ pub struct Punch {
     pub card_kind: Option<String>,
     pub employee_name: Option<String>,
     pub punched_at: DateTime<Utc>,
+    /// `punched_at` が端末の時計 (`device`) か受信の時刻 (`received`。端末の時計が合う前の打刻など) か
+    pub punched_at_source: TimeSource,
     pub created_at: DateTime<Utc>,
     pub measurement_id: Option<Uuid>,
     pub alcohol_level: Option<f64>,
@@ -454,6 +457,7 @@ WITH p AS (
         hm.kind,
         COALESCE(hm.payload->>'card_kind', CASE WHEN hm.kind = 'license' THEN 'license' END) AS card_kind,
         COALESCE(hm.recorded_at, hm.created_at) AS punched_at,
+        hm.recorded_at IS NULL AS punched_at_received,
         hm.created_at,
         hm.is_dev,
         hm.measurement_id
@@ -501,7 +505,7 @@ LEFT JOIN LATERAL (
     const PUNCH_MEASUREMENT_COLUMNS: &str = r#"
 m.id AS measurement_id, m.alcohol_level, m.result,
 CASE WHEN m.id IS NOT NULL THEN ts.status IS NOT NULL END AS tenko_recorded,
-ts.status AS tenko_status, ts.tenko_method, ts.manager_judgment_method
+ts.status AS tenko_status, ts.tenko_method, ts.manager_judgment_method, p.punched_at_received
 "#;
 
     /// 絞り込み ($2 = 社員、$3 = 以降、$4 = 以前。どれも NULL なら絞らない)
@@ -576,6 +580,7 @@ fn punch(r: &Row) -> Punch {
         tenko_status: r.get(15),
         tenko_method: r.get(16),
         manager_judgment_method: r.get(17),
+        punched_at_source: TimeSource::of(r.get(18)),
     }
 }
 

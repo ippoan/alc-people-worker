@@ -346,6 +346,97 @@ async fn timecard_links_measurement() {
 
 /// 一覧: 受信の新しい順・絞り込み・1 件多く引いて has_more。鍵の ID で絞ると結び付いた hub の行も返し、
 /// hub の行の machine_id は鍵の ID に畳む
+/// 端末の時計が合う前 (1970 起点) の記録は端末の時刻を捨てて受信の時刻で読み、どちらかを返す
+#[tokio::test]
+async fn device_clock_before_2020_uses_received_time() {
+    let app = support::app().await;
+    let t = tenant().await;
+    let emp = employee(t, "時刻 太郎").await;
+    let got = call(
+        &app,
+        "POST",
+        "/api/timecard/cards",
+        Some(t),
+        Some(json!({ "employee_id": emp, "card_id": "00000000000000aa" })),
+    )
+    .await;
+    assert_eq!(got.status, 201);
+    let at = |mut v: Value, ms: i64| {
+        v["recorded_at_ms"] = json!(ms);
+        v
+    };
+    let body = json!([
+        at(
+            m(
+                "tc",
+                "timecard",
+                1,
+                json!({ "card_id": "00000000000000aa" })
+            ),
+            323_354
+        ),
+        at(
+            m(
+                "tc",
+                "timecard",
+                2,
+                json!({ "card_id": "00000000000000aa" })
+            ),
+            1_761_980_037_735
+        ),
+        at(m("tc", "temperature", 3, json!({})), 1_577_836_799_999),
+    ]);
+    assert_eq!(post(&app, t, body, false).await.status, 201);
+
+    let rows = get(&app, t, "?device_id=tc", false).await.json();
+    let seen: Vec<(i64, Value, Value)> = rows["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| {
+            (
+                r["seq"].as_i64().unwrap(),
+                r["recorded_at"].clone(),
+                r["recorded_at_source"].clone(),
+            )
+        })
+        .collect();
+    let mut seen = seen;
+    seen.sort_by_key(|r| r.0);
+    assert_eq!(
+        seen,
+        vec![
+            (1, Value::Null, json!("received")),
+            (2, json!("2025-11-01T06:53:57.735Z"), json!("device")),
+            (3, Value::Null, json!("received")),
+        ]
+    );
+
+    let punches = call(&app, "GET", "/api/timecard/punches", Some(t), None)
+        .await
+        .json();
+    let mut punched: Vec<(String, Value)> = punches["punches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| {
+            (
+                p["punched_at"].as_str().unwrap().to_owned(),
+                p["punched_at_source"].clone(),
+            )
+        })
+        .collect();
+    punched.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(punched.len(), 2);
+    assert_eq!(
+        punched[0],
+        ("2025-11-01T06:53:57.735Z".to_owned(), json!("device"))
+    );
+    // 受信の時刻 (= 今日) で読むので 1970 にならない
+    assert!(punched[1].0.as_str() > "2026-01-01", "{punched:?}");
+    assert_eq!(punched[1].1, json!("received"));
+}
+
 #[tokio::test]
 async fn list_filters_and_links_keys() {
     let app = support::app().await;
