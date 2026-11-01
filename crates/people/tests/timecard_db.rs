@@ -544,6 +544,7 @@ async fn lookup_employee_by_card() {
 }
 
 /// 打刻の行を入れる (`at` は基準からの秒)
+/// 打刻の行を直に入れる。payload の `measurement_id` は列にも写す (取り込みが列に書いた行の代わり)
 async fn hub_row(
     tenant: Uuid,
     seq: i64,
@@ -553,12 +554,39 @@ async fn hub_row(
     at: i64,
     is_dev: bool,
 ) -> Uuid {
+    let measurement_id: Option<Uuid> = payload["measurement_id"]
+        .as_str()
+        .map(|s| s.parse().unwrap());
+    hub_row_linked(
+        tenant,
+        seq,
+        device,
+        kind,
+        payload,
+        at,
+        is_dev,
+        measurement_id,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn hub_row_linked(
+    tenant: Uuid,
+    seq: i64,
+    device: &str,
+    kind: &str,
+    payload: Value,
+    at: i64,
+    is_dev: bool,
+    measurement_id: Option<Uuid>,
+) -> Uuid {
     admin()
         .await
         .query_one(
-            "INSERT INTO alc_api.hub_measurements (tenant_id, device_id, kind, payload, seq, recorded_at, is_dev) \
-             VALUES ($1, $2, $3, $4, $5, to_timestamp(1767225600 + $6::bigint), $7) RETURNING id",
-            &[&tenant, &device, &kind, &payload, &seq, &at, &is_dev],
+            "INSERT INTO alc_api.hub_measurements (tenant_id, device_id, kind, payload, seq, recorded_at, is_dev, measurement_id) \
+             VALUES ($1, $2, $3, $4, $5, to_timestamp(1767225600 + $6::bigint), $7, $8) RETURNING id",
+            &[&tenant, &device, &kind, &payload, &seq, &at, &is_dev, &measurement_id],
         )
         .await
         .unwrap()
@@ -821,6 +849,151 @@ async fn punches_list_and_csv() {
             .count(),
         2
     );
+    support::assert_logs_clean(&app, &[]);
+}
+
+async fn tenko_session(
+    t: Uuid,
+    emp: Uuid,
+    m: Uuid,
+    method: &str,
+    status: &str,
+    judged: Option<&str>,
+    at: i64,
+) {
+    admin()
+        .await
+        .execute(
+            "INSERT INTO alc_api.tenko_sessions \
+               (tenant_id, employee_id, tenko_type, status, measurement_id, is_dev, tenko_method, manager_judgment_method, created_at) \
+             VALUES ($1, $2, 'pre_operation', $3, $4, false, $5, $6, to_timestamp(1767225600 + $7::bigint))",
+            &[&t, &emp, &status, &m, &method, &judged, &at],
+        )
+        .await
+        .unwrap();
+}
+
+/// 一覧と CSV は列 `measurement_id` で測定に結び、その測定の点呼の状態・区分・判定の方法を返す
+/// (同じ測定に複数あれば新しい方)。payload の文字列だけの行は結ばない
+#[tokio::test]
+async fn punches_carry_tenko_status_and_method() {
+    let app = support::app().await;
+    let t = tenant().await;
+    let emp = employee_with(t, "点呼 三郎", Some("P003"), None).await;
+    let mut ms = Vec::new();
+    for _ in 0..6 {
+        ms.push(measurement(t, emp, 0.0, "pass", false).await);
+    }
+    tenko_session(t, emp, ms[0], "IT点呼", "judgment_pending", None, 1).await;
+    tenko_session(t, emp, ms[1], "IT点呼", "completed", Some("in_person"), 2).await;
+    tenko_session(t, emp, ms[2], "遠隔点呼", "cancelled", None, 3).await;
+    tenko_session(t, emp, ms[4], "自動点呼", "cancelled", None, 4).await;
+    tenko_session(t, emp, ms[4], "通常点呼", "completed", None, 5).await;
+    let payload =
+        |m: Uuid| json!({ "employee_id": emp.to_string(), "measurement_id": m.to_string() });
+    let mut rows = Vec::new();
+    for (i, m) in ms.iter().take(5).enumerate() {
+        rows.push(
+            hub_row(
+                t,
+                i as i64 + 1,
+                "browser",
+                "timecard",
+                payload(*m),
+                10 * (i as i64 + 1),
+                false,
+            )
+            .await,
+        );
+    }
+    // payload にだけ id があり列が NULL の行 (取り込みが結ばなかった行) は測定に結ばない
+    let unlinked =
+        hub_row_linked(t, 6, "browser", "timecard", payload(ms[5]), 60, false, None).await;
+
+    let body = call(&app, "GET", "/api/timecard/punches", Some(t), None)
+        .await
+        .json();
+    let punches = body["punches"].as_array().unwrap().clone();
+    let by = |id: Uuid| {
+        punches
+            .iter()
+            .find(|p| p["id"] == id.to_string())
+            .unwrap()
+            .clone()
+    };
+    let fields = |id: Uuid| {
+        let p = by(id);
+        (
+            p["tenko_recorded"].clone(),
+            p["tenko_status"].clone(),
+            p["tenko_method"].clone(),
+            p["manager_judgment_method"].clone(),
+        )
+    };
+    assert_eq!(
+        fields(rows[0]),
+        (
+            json!(true),
+            json!("judgment_pending"),
+            json!("IT点呼"),
+            json!(null)
+        )
+    );
+    assert_eq!(
+        fields(rows[1]),
+        (
+            json!(true),
+            json!("completed"),
+            json!("IT点呼"),
+            json!("in_person")
+        )
+    );
+    assert_eq!(
+        fields(rows[2]),
+        (
+            json!(true),
+            json!("cancelled"),
+            json!("遠隔点呼"),
+            json!(null)
+        )
+    );
+    assert_eq!(
+        fields(rows[3]),
+        (json!(false), json!(null), json!(null), json!(null))
+    );
+    assert_eq!(
+        fields(rows[4]),
+        (
+            json!(true),
+            json!("completed"),
+            json!("通常点呼"),
+            json!(null)
+        )
+    );
+    assert_eq!(by(rows[3])["measurement_id"], ms[3].to_string());
+    assert!(by(unlinked)["measurement_id"].is_null());
+    assert_eq!(
+        fields(unlinked),
+        (json!(null), json!(null), json!(null), json!(null))
+    );
+
+    let csv = call(&app, "GET", "/api/timecard/punches/csv", Some(t), None).await;
+    let text = String::from_utf8(csv.body[3..].to_vec()).unwrap();
+    let label = |id: Uuid| {
+        text.lines()
+            .find(|l| l.starts_with(&id.to_string()))
+            .unwrap()
+            .rsplit(',')
+            .next()
+            .unwrap()
+            .to_owned()
+    };
+    assert_eq!(label(rows[0]), "判定待ち");
+    assert_eq!(label(rows[1]), "済");
+    assert_eq!(label(rows[2]), "中止");
+    assert_eq!(label(rows[3]), "未");
+    assert_eq!(label(rows[4]), "済");
+    assert_eq!(label(unlinked), "");
     support::assert_logs_clean(&app, &[]);
 }
 

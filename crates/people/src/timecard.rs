@@ -173,7 +173,14 @@ pub struct Punch {
     pub measurement_id: Option<Uuid>,
     pub alcohol_level: Option<f64>,
     pub result: Option<String>,
+    /// 結ばれた測定に点呼のセッションがあるか (測定が無ければ None)。互換のため残す — 状態は `tenko_status`
     pub tenko_recorded: Option<bool>,
+    /// 点呼のセッションの状態 (`completed` / `judgment_pending` / `cancelled` ほか。セッションが無ければ None)
+    pub tenko_status: Option<String>,
+    /// `通常点呼` / `IT点呼` / `遠隔点呼` / `自動点呼`
+    pub tenko_method: Option<String>,
+    /// IT点呼を運行管理者が通話 (`it`) と対面 (`in_person`) のどちらで確定したか
+    pub manager_judgment_method: Option<String>,
 }
 
 impl TxOutput for Punch {}
@@ -200,7 +207,8 @@ pub struct CsvRow {
     pub measurement_id: Option<Uuid>,
     pub alcohol_level: Option<f64>,
     pub result: Option<String>,
-    pub tenko_recorded: Option<bool>,
+    /// 点呼のセッションの状態 (セッションが無ければ None)
+    pub tenko_status: Option<String>,
 }
 
 impl TxOutput for CsvRow {}
@@ -286,12 +294,15 @@ pub fn csv_card_kind_label(card_kind: Option<&str>) -> String {
     }
 }
 
-/// CSV の「点呼記録」列。結ばれた測定が無い打刻は空欄
-pub fn csv_tenko_recorded_label(tenko_recorded: Option<bool>) -> &'static str {
-    match tenko_recorded {
-        Some(true) => "済",
-        Some(false) => "未",
-        None => "",
+/// CSV の「点呼記録」列。結ばれた測定が無い打刻は空欄。記録まで済んだ (`completed`) ものだけ「済」で、
+/// 運行管理者の判定待ちと中止 (`cancelled` / `interrupted`) は分けて出す。セッションが無い・途中は「未」
+pub fn csv_tenko_label(measured: bool, tenko_status: Option<&str>) -> &'static str {
+    match (measured, tenko_status) {
+        (false, _) => "",
+        (true, Some("completed")) => "済",
+        (true, Some("judgment_pending")) => "判定待ち",
+        (true, Some("cancelled" | "interrupted")) => "中止",
+        (true, _) => "未",
     }
 }
 
@@ -333,7 +344,7 @@ pub fn render_csv(rows: &[CsvRow]) -> Vec<u8> {
                 .unwrap_or_default(),
             r.alcohol_level.map(|v| v.to_string()).unwrap_or_default(),
             r.result.clone().unwrap_or_default(),
-            csv_tenko_recorded_label(r.tenko_recorded).to_owned(),
+            csv_tenko_label(r.measurement_id.is_some(), r.tenko_status.as_deref()).to_owned(),
         ])
         .expect("csv row");
     }
@@ -445,7 +456,7 @@ WITH p AS (
         COALESCE(hm.recorded_at, hm.created_at) AS punched_at,
         hm.created_at,
         hm.is_dev,
-        hm.payload->>'measurement_id' AS payload_measurement_id
+        hm.measurement_id
     FROM alc_api.hub_measurements hm
     LEFT JOIN alc_api.timecard_cards tc
            ON tc.tenant_id = hm.tenant_id
@@ -470,25 +481,27 @@ WITH p AS (
 )
 "#;
 
-    /// 打刻に結ばれた測定 (tenant・is_dev・社員・id が全部そろったときだけ。id は形を見てから uuid に)
+    /// 打刻に結ばれた測定 (列 `hub_measurements.measurement_id` の外部キー。tenant・軸・社員は取り込みで確かめてある)
+    /// と、その測定の点呼のセッション (同じ測定に複数あれば新しい方の 1 行)
     const PUNCH_MEASUREMENT_JOIN: &str = r#"
 LEFT JOIN alc_api.measurements m
        ON m.tenant_id = p.tenant_id
-      AND m.is_dev = p.is_dev
-      AND m.employee_id = p.employee_id
-      AND m.id = CASE WHEN p.payload_measurement_id
-                           ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
-                      THEN p.payload_measurement_id::uuid END
+      AND m.id = p.measurement_id
+LEFT JOIN LATERAL (
+    SELECT ts.status, ts.tenko_method, ts.manager_judgment_method
+    FROM alc_api.tenko_sessions ts
+    WHERE ts.tenant_id = m.tenant_id
+      AND ts.is_dev = m.is_dev
+      AND ts.measurement_id = m.id
+    ORDER BY ts.created_at DESC, ts.id DESC
+    LIMIT 1
+) ts ON true
 "#;
 
     const PUNCH_MEASUREMENT_COLUMNS: &str = r#"
 m.id AS measurement_id, m.alcohol_level, m.result,
-CASE WHEN m.id IS NOT NULL THEN EXISTS (
-    SELECT 1 FROM alc_api.tenko_sessions ts
-    WHERE ts.tenant_id = m.tenant_id
-      AND ts.is_dev = m.is_dev
-      AND ts.measurement_id = m.id
-) END AS tenko_recorded
+CASE WHEN m.id IS NOT NULL THEN ts.status IS NOT NULL END AS tenko_recorded,
+ts.status AS tenko_status, ts.tenko_method, ts.manager_judgment_method
 "#;
 
     /// 絞り込み ($2 = 社員、$3 = 以降、$4 = 以前。どれも NULL なら絞らない)
@@ -560,6 +573,9 @@ fn punch(r: &Row) -> Punch {
         alcohol_level: r.get(12),
         result: r.get(13),
         tenko_recorded: r.get(14),
+        tenko_status: r.get(15),
+        tenko_method: r.get(16),
+        manager_judgment_method: r.get(17),
     }
 }
 
@@ -575,7 +591,7 @@ fn csv_row(r: &Row) -> CsvRow {
         measurement_id: r.get(7),
         alcohol_level: r.get(8),
         result: r.get(9),
-        tenko_recorded: r.get(10),
+        tenko_status: r.get(11),
     }
 }
 
@@ -1199,9 +1215,13 @@ mod tests {
         assert_eq!(csv_card_kind_label(Some("nfca_uid")), "ICカード");
         assert_eq!(csv_card_kind_label(Some("x")), "x");
         assert_eq!(csv_card_kind_label(None), "");
-        assert_eq!(csv_tenko_recorded_label(Some(true)), "済");
-        assert_eq!(csv_tenko_recorded_label(Some(false)), "未");
-        assert_eq!(csv_tenko_recorded_label(None), "");
+        assert_eq!(csv_tenko_label(true, Some("completed")), "済");
+        assert_eq!(csv_tenko_label(true, Some("judgment_pending")), "判定待ち");
+        assert_eq!(csv_tenko_label(true, Some("cancelled")), "中止");
+        assert_eq!(csv_tenko_label(true, Some("interrupted")), "中止");
+        assert_eq!(csv_tenko_label(true, Some("alcohol_testing")), "未");
+        assert_eq!(csv_tenko_label(true, None), "未");
+        assert_eq!(csv_tenko_label(false, None), "");
     }
 
     #[test]
@@ -1218,7 +1238,7 @@ mod tests {
             measurement_id: None,
             alcohol_level: Some(0.05),
             result: None,
-            tenko_recorded: None,
+            tenko_status: None,
         }]);
         assert_eq!(&bytes[..3], &[0xEF, 0xBB, 0xBF]);
         let text = std::str::from_utf8(&bytes[3..]).unwrap();
