@@ -212,6 +212,8 @@ pub struct CsvRow {
     pub result: Option<String>,
     /// 点呼のセッションの状態 (セッションが無ければ None)
     pub tenko_status: Option<String>,
+    /// 打刻日時が端末の時計か受信の時刻か
+    pub punched_at_source: TimeSource,
 }
 
 impl TxOutput for CsvRow {}
@@ -310,7 +312,7 @@ pub fn csv_tenko_label(measured: bool, tenko_status: Option<&str>) -> &'static s
 }
 
 /// CSV の見出し (rust と同じ 11 列。区分列は必須 — 無いと点呼が打刻として集計される)
-pub const CSV_HEADER: [&str; 11] = [
+pub const CSV_HEADER: [&str; 12] = [
     "ID",
     "区分",
     "カード",
@@ -322,7 +324,17 @@ pub const CSV_HEADER: [&str; 11] = [
     "アルコール値",
     "判定",
     "点呼記録",
+    "打刻日時の出どころ",
 ];
+
+/// CSV の「打刻日時の出どころ」列。端末の時計なら「端末」、受信の時刻 (端末が時刻を送らなかったか、
+/// 時計が合う前だった) なら「受信」
+pub fn csv_time_source_label(source: TimeSource) -> &'static str {
+    match source {
+        TimeSource::Device => "端末",
+        TimeSource::Received => "受信",
+    }
+}
 
 /// CSV の本体 (UTF-8 の BOM + 見出し + 行。打刻日時は JST)
 pub fn render_csv(rows: &[CsvRow]) -> Vec<u8> {
@@ -348,6 +360,7 @@ pub fn render_csv(rows: &[CsvRow]) -> Vec<u8> {
             r.alcohol_level.map(|v| v.to_string()).unwrap_or_default(),
             r.result.clone().unwrap_or_default(),
             csv_tenko_label(r.measurement_id.is_some(), r.tenko_status.as_deref()).to_owned(),
+            csv_time_source_label(r.punched_at_source).to_owned(),
         ])
         .expect("csv row");
     }
@@ -597,6 +610,7 @@ fn csv_row(r: &Row) -> CsvRow {
         alcohol_level: r.get(8),
         result: r.get(9),
         tenko_status: r.get(11),
+        punched_at_source: TimeSource::of(r.get(14)),
     }
 }
 
@@ -1244,6 +1258,7 @@ mod tests {
             alcohol_level: Some(0.05),
             result: None,
             tenko_status: None,
+            punched_at_source: TimeSource::Received,
         }]);
         assert_eq!(&bytes[..3], &[0xEF, 0xBB, 0xBF]);
         let text = std::str::from_utf8(&bytes[3..]).unwrap();
@@ -1251,7 +1266,7 @@ mod tests {
         assert_eq!(lines.next().unwrap(), CSV_HEADER.join(","));
         assert_eq!(
             lines.next().unwrap(),
-            format!("{id},打刻,ICカード,E1,,2026-01-15 09:30:00,,,0.05,,")
+            format!("{id},打刻,ICカード,E1,,2026-01-15 09:30:00,,,0.05,,,受信")
         );
     }
 }
