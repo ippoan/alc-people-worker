@@ -111,6 +111,14 @@ jobs:
             echo "::error::staging に workers.dev の URL が付いた (workers_dev = false のはず。直ちに止めること)"
             exit 1
           fi
+      - name: Report staging deploy to ci-dashboard (compat)
+        # Refs ippoan/ci-dashboard#520: frontend が staging の worker を相手にテストした SHA を引くための記録
+        uses: ippoan/ci-workflows/.github/actions/report-backend-deploy@main
+        with:
+          environment: staging
+          current_image: ${{ github.sha }}
+          deployed_by: alc-worker-deploy-staging
+          webhook_secret: ${{ secrets.RELEASE_WAVE_WEBHOOK_SECRET }}
 
   deploy-prod:
     name: deploy production
@@ -152,3 +160,11 @@ jobs:
             echo "::error::本番に workers.dev の URL が付いた (workers_dev = false のはず。直ちに止めること)"
             exit 1
           fi
+      - name: Report production deploy to ci-dashboard (compat)
+        # Refs ippoan/ci-dashboard#520: Release Wave compatibility の backend (識別子 = git SHA)
+        uses: ippoan/ci-workflows/.github/actions/report-backend-deploy@main
+        with:
+          current_image: ${{ github.sha }}
+          current_tag: ${{ github.ref_name }}
+          deployed_by: alc-worker-deploy
+          webhook_secret: ${{ secrets.RELEASE_WAVE_WEBHOOK_SECRET }}
