@@ -125,11 +125,13 @@ pub mod sql {
     /// 機体の鍵の ID (`alarm:<fingerprint>`) で絞ると、その鍵に結び付いた hub の ID の行も返す。
     /// `machine_id` は hub の ID の行を、結び付いた鍵の ID (最後に見えたもの) に畳む。dev の軸は跨がない。
     /// 列 `measurement_id` で結ばれた点呼 (同じ測定に複数あれば新しい方) の区分・確定の方法・場所も返す
-    /// (打刻の一覧 [`crate::timecard`] と同じ結び方。結ばれていなければ NULL)
+    /// (打刻の一覧 [`crate::timecard`] と同じ結び方。結ばれていなければ NULL)。
+    /// 結ばれた測定の状態 (`started` / `completed` …) も返す (点呼まで進まなかった回を画面が「未完了」と出すため)
     pub const LIST: &str = "SELECT h.id, h.tenant_id, h.device_id, h.kind, h.payload, h.seq, h.session_id, \
                 h.via_device_id, COALESCE(link.key_id, h.device_id) AS machine_id, h.recorded_at, h.created_at, \
-                ts.tenko_method, ts.manager_judgment_method, ts.location \
+                ts.tenko_method, ts.manager_judgment_method, ts.location, ms.status \
            FROM alc_api.hub_measurements h \
+           LEFT JOIN alc_api.measurements ms ON ms.tenant_id = h.tenant_id AND ms.id = h.measurement_id \
            LEFT JOIN LATERAL ( \
                 SELECT l.device_id AS key_id FROM alc_api.hub_measurements l \
                  WHERE l.tenant_id = h.tenant_id AND l.is_dev = h.is_dev AND l.via_device_id = h.device_id \
@@ -216,6 +218,8 @@ pub struct HubMeasurement {
     pub manager_judgment_method: Option<String>,
     /// 結ばれた点呼の実施場所 (`tenko_sessions.location`)
     pub tenko_location: Option<String>,
+    /// 結ばれた測定の状態 (`measurements.status`)。測定に結ばれていなければ null
+    pub measurement_status: Option<String>,
 }
 
 impl TxOutput for HubMeasurement {}
@@ -403,6 +407,7 @@ fn measurement(r: &Row) -> HubMeasurement {
         tenko_method: r.get(11),
         manager_judgment_method: r.get(12),
         tenko_location: r.get(13),
+        measurement_status: r.get(14),
     }
 }
 

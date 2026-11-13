@@ -559,6 +559,14 @@ async fn list_carries_tenko_method_and_location() {
     let emp = employee(t, "点呼 五郎").await;
     let m_it = measurement(t, emp, false).await;
     let m_none = measurement(t, emp, false).await;
+    admin()
+        .await
+        .execute(
+            "UPDATE alc_api.measurements SET status = 'started' WHERE id = $1",
+            &[&m_none],
+        )
+        .await
+        .unwrap();
     for (method, judged, location, at) in [
         ("遠隔点呼", None, Some("旧営業所"), 0_i64),
         ("IT点呼", Some("in_person"), Some("本社営業所"), 60),
@@ -590,7 +598,7 @@ async fn list_carries_tenko_method_and_location() {
 
     let all = get(&app, t, "", false).await.json();
     // 1 回の POST は受信の時刻が同じなので、並びは seq で揃えて比べる
-    let mut seen: Vec<(i64, Value, Value, Value)> = all["items"]
+    let mut seen: Vec<(i64, Value, Value, Value, Value)> = all["items"]
         .as_array()
         .unwrap()
         .iter()
@@ -600,6 +608,7 @@ async fn list_carries_tenko_method_and_location() {
                 r["tenko_method"].clone(),
                 r["manager_judgment_method"].clone(),
                 r["tenko_location"].clone(),
+                r["measurement_status"].clone(),
             )
         })
         .collect();
@@ -607,9 +616,16 @@ async fn list_carries_tenko_method_and_location() {
     assert_eq!(
         seen,
         vec![
-            (1, json!("IT点呼"), json!("in_person"), json!("本社営業所")),
-            (2, Value::Null, Value::Null, Value::Null),
-            (3, Value::Null, Value::Null, Value::Null),
+            (
+                1,
+                json!("IT点呼"),
+                json!("in_person"),
+                json!("本社営業所"),
+                json!("completed")
+            ),
+            // 測定は在るが点呼まで進まなかった (started のまま) = 画面の「未完了」
+            (2, Value::Null, Value::Null, Value::Null, json!("started")),
+            (3, Value::Null, Value::Null, Value::Null, Value::Null),
         ]
     );
 }
