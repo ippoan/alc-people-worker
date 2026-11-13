@@ -123,15 +123,23 @@ pub mod sql {
     /// 一覧 (受信の新しい順、1 件多く引く)。$1 tenant_id / $2 device_id / $3 kind / $4 session_id / $5 from / $6 to
     /// (どれも NULL なら絞らない) / $7 件数 / $8 飛ばす件数。
     /// 機体の鍵の ID (`alarm:<fingerprint>`) で絞ると、その鍵に結び付いた hub の ID の行も返す。
-    /// `machine_id` は hub の ID の行を、結び付いた鍵の ID (最後に見えたもの) に畳む。dev の軸は跨がない
+    /// `machine_id` は hub の ID の行を、結び付いた鍵の ID (最後に見えたもの) に畳む。dev の軸は跨がない。
+    /// 列 `measurement_id` で結ばれた点呼 (同じ測定に複数あれば新しい方) の区分・確定の方法・場所も返す
+    /// (打刻の一覧 [`crate::timecard`] と同じ結び方。結ばれていなければ NULL)
     pub const LIST: &str = "SELECT h.id, h.tenant_id, h.device_id, h.kind, h.payload, h.seq, h.session_id, \
-                h.via_device_id, COALESCE(link.key_id, h.device_id) AS machine_id, h.recorded_at, h.created_at \
+                h.via_device_id, COALESCE(link.key_id, h.device_id) AS machine_id, h.recorded_at, h.created_at, \
+                ts.tenko_method, ts.manager_judgment_method, ts.location \
            FROM alc_api.hub_measurements h \
            LEFT JOIN LATERAL ( \
                 SELECT l.device_id AS key_id FROM alc_api.hub_measurements l \
                  WHERE l.tenant_id = h.tenant_id AND l.is_dev = h.is_dev AND l.via_device_id = h.device_id \
                  ORDER BY l.created_at DESC LIMIT 1 \
            ) link ON true \
+           LEFT JOIN LATERAL ( \
+                SELECT s.tenko_method, s.manager_judgment_method, s.location FROM alc_api.tenko_sessions s \
+                 WHERE s.tenant_id = h.tenant_id AND s.is_dev = h.is_dev AND s.measurement_id = h.measurement_id \
+                 ORDER BY s.created_at DESC, s.id DESC LIMIT 1 \
+           ) ts ON true \
           WHERE h.tenant_id = $1 \
             AND ($2::text IS NULL OR h.device_id = $2 OR h.device_id IN ( \
                  SELECT l.via_device_id FROM alc_api.hub_measurements l \
@@ -202,6 +210,12 @@ pub struct HubMeasurement {
     pub created_at: DateTime<Utc>,
     /// `recorded_at` が端末の時計か (NULL なら受信の時刻 `created_at` で読む)
     pub recorded_at_source: TimeSource,
+    /// 結ばれた点呼の区分 (`通常点呼` / `IT点呼` / `遠隔点呼` / `自動点呼`)。点呼に結ばれていなければ null
+    pub tenko_method: Option<String>,
+    /// IT点呼 を運行管理者が通話 (`it`) と対面 (`in_person`) のどちらで確定したか
+    pub manager_judgment_method: Option<String>,
+    /// 結ばれた点呼の実施場所 (`tenko_sessions.location`)
+    pub tenko_location: Option<String>,
 }
 
 impl TxOutput for HubMeasurement {}
@@ -386,6 +400,9 @@ fn measurement(r: &Row) -> HubMeasurement {
         recorded_at,
         created_at: r.get(10),
         recorded_at_source: TimeSource::of(recorded_at.is_none()),
+        tenko_method: r.get(11),
+        manager_judgment_method: r.get(12),
+        tenko_location: r.get(13),
     }
 }
 

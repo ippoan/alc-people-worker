@@ -550,6 +550,70 @@ async fn list_filters_and_links_keys() {
     }
 }
 
+/// 一覧: 列 `measurement_id` で結ばれた点呼の区分・確定の方法・場所を返す (同じ測定に複数あれば新しい方)。
+/// 結ばれていない行と、測定が在っても点呼が無い行は null
+#[tokio::test]
+async fn list_carries_tenko_method_and_location() {
+    let app = support::app().await;
+    let t = tenant().await;
+    let emp = employee(t, "点呼 五郎").await;
+    let m_it = measurement(t, emp, false).await;
+    let m_none = measurement(t, emp, false).await;
+    for (method, judged, location, at) in [
+        ("遠隔点呼", None, Some("旧営業所"), 0_i64),
+        ("IT点呼", Some("in_person"), Some("本社営業所"), 60),
+    ] {
+        admin()
+            .await
+            .execute(
+                "INSERT INTO alc_api.tenko_sessions \
+                   (tenant_id, employee_id, tenko_type, status, measurement_id, is_dev, tenko_method, \
+                    manager_judgment_method, location, created_at) \
+                 VALUES ($1, $2, 'pre_operation', 'completed', $3, false, $4, $5, $6, \
+                         to_timestamp(1767225600 + $7::bigint))",
+                &[&t, &emp, &m_it, &method, &judged, &location, &at],
+            )
+            .await
+            .unwrap();
+    }
+    let body = json!([
+        in_session(m("hub-1", "alcohol", 1, json!({ "measurement_id": m_it }))),
+        in_session(m(
+            "hub-1",
+            "temperature",
+            2,
+            json!({ "measurement_id": m_none })
+        )),
+        in_session(m("hub-1", "license", 3, json!({}))),
+    ]);
+    assert_eq!(post(&app, t, body, false).await.status, 201);
+
+    let all = get(&app, t, "", false).await.json();
+    // 1 回の POST は受信の時刻が同じなので、並びは seq で揃えて比べる
+    let mut seen: Vec<(i64, Value, Value, Value)> = all["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| {
+            (
+                r["seq"].as_i64().unwrap(),
+                r["tenko_method"].clone(),
+                r["manager_judgment_method"].clone(),
+                r["tenko_location"].clone(),
+            )
+        })
+        .collect();
+    seen.sort_by_key(|r| r.0);
+    assert_eq!(
+        seen,
+        vec![
+            (1, json!("IT点呼"), json!("in_person"), json!("本社営業所")),
+            (2, Value::Null, Value::Null, Value::Null),
+            (3, Value::Null, Value::Null, Value::Null),
+        ]
+    );
+}
+
 #[tokio::test]
 async fn db_failures_are_500_with_fixed_logs() {
     let app = build(broken_client().await);

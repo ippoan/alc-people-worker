@@ -33,6 +33,6 @@ DB テストは使い捨ての postgres:17 へ。URL が無ければ失敗 (skip
 - role は見ない (rust も `X-Tenant-ID` だけ)。
 - DB は `PgClient::tenant_tx` + `query_typed` 系だけ。名前付き prepared statement 禁止。Row を tx の外へ出さない。
   WHERE に tenant_id も明示する。SQL の意味は rust の repo と同じにする。`dry_run` は SAVEPOINT へ戻して書かない。
-- `coverage_100.toml` の登録を外さない。CI の本数 (lib 14・timecard_db 9・employees_db 5・hub_db 8) はテストを足したら上げる。
+- `coverage_100.toml` の登録を外さない。CI の本数 (lib 14・timecard_db 9・employees_db 5・hub_db 9) はテストを足したら上げる。
 - public repo: ホスト名・tenant UUID・個人情報を書かない。`v*` タグ = 本番 (Tag Release 手動)。
 - kit の rev は直下 `Cargo.toml` の 1 か所 (alc-records-worker と同じ rev)。
